@@ -311,7 +311,7 @@ def estimate_timeseries(A, B, tbase_diff, ifgram, weight_sqrt=None, min_norm_vel
     Parameters: A                 - 2D np.array in size of (num_ifgram, num_date-1)
                 B                 - 2D np.array in size of (num_ifgram, num_date-1),
                                     design matrix B, each row represents differential temporal
-                                    baseline history between master and slave date of one interferogram
+                                    baseline history between reference and secondary date of one interferogram
                 tbase_diff        - 2D np.array in size of (num_date-1, 1),
                                     differential temporal baseline history
                 ifgram            - 2D np.array in size of (num_ifgram, num_pixel),
@@ -645,6 +645,8 @@ def calc_weight(stack_obj, box, weight_func='var', dropIfgram=True, chunk_size=1
     """Read coherence and calculate weight from it, chunk by chunk to save memory
     """
 
+    print('calculating weight from spatial coherence ...')
+
     # read coherence
     weight = read_coherence(stack_obj, box=box, dropIfgram=dropIfgram)
     num_pixel = weight.shape[1]
@@ -655,6 +657,8 @@ def calc_weight(stack_obj, box, weight_func='var', dropIfgram=True, chunk_size=1
         # use the typical ratio of resolution vs pixel size of Sentinel-1 IW mode
         L = int(stack_obj.metadata['ALOOKS']) * int(stack_obj.metadata['RLOOKS'])
         L = np.rint(L / 1.94)
+    # make sure L >= 1
+    L = max(L, 1)
 
     # convert coherence to weight chunk-by-chunk to save memory
     num_chunk = int(np.ceil(num_pixel / chunk_size))

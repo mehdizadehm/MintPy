@@ -63,7 +63,7 @@ TEMPLATE = get_template_content('load_data')
 NOTE = """NOTE:
   For interferogram, unwrapPhase is required, the other dataset are optional, including coherence, connectComponent, wrapPhase, etc.
   The unwrapPhase metadata file requires DATE12 attribute in YYMMDD-YYMMDD format.
-  All path of data file must contain the master and slave date, either in file name or folder name.
+  All path of data file must contain the reference and secondary date, either in file name or folder name.
 """
 
 EXAMPLE = """example:
@@ -157,6 +157,7 @@ def read_inps2dict(inps):
             inpsDict[key] = template[prefix+key]
         elif value:
             inpsDict[prefix+key] = template[prefix+key]
+    print('processor : {}'.format(inpsDict['processor']))
 
     if inpsDict['compression'] == False:
         inpsDict['compression'] = None
@@ -166,9 +167,14 @@ def read_inps2dict(inps):
         cfile = [i for i in list(inps.template_file) if os.path.basename(i) != 'smallbaselineApp.cfg']
         inpsDict['PROJECT_NAME'] = sensor.project_name2sensor_name(cfile)[1]
 
-    inpsDict['PLATFORM'] = str(sensor.project_name2sensor_name(str(inpsDict['PROJECT_NAME']))[0])
-    print('SAR platform/sensor : {}'.format(inpsDict['PLATFORM']))
-    print('processor: {}'.format(inpsDict['processor']))
+    msg = 'SAR platform/sensor : '
+    sensor_name = sensor.project_name2sensor_name(str(inpsDict['PROJECT_NAME']))[0]
+    if sensor_name:
+        msg += str(sensor_name)
+        inpsDict['PLATFORM'] = str(sensor_name)
+    else:
+        msg += 'unknown from project name "{}"'.format(inpsDict['PROJECT_NAME'])
+    print(msg)
 
     # update file path with auto
     if inpsDict.get('autoPath', False):
@@ -399,7 +405,7 @@ def read_inps_dict2ifgram_stack_dict_object(inpsDict):
         # One pair may have several types of dataset.
         # example ifgramPathDict = {'unwrapPhase': /pathToFile/filt.unw,
         #                           'ionoPhase'  : /PathToFile/iono.bil}
-        # All path of data file must contain the master and slave date, either in file name or folder name.
+        # All path of data file must contain the reference and secondary date, either in file name or folder name.
 
         ifgramPathDict = {}
         for i in range(len(dsNameList)):
@@ -419,7 +425,7 @@ def read_inps_dict2ifgram_stack_dict_object(inpsDict):
                     print('WARNING: {} file missing for pair {}'.format(dsName, dates))
 
         # initiate ifgramDict object
-        ifgramObj = ifgramDict(dates=tuple(dates), datasetDict=ifgramPathDict)
+        ifgramObj = ifgramDict(datasetDict=ifgramPathDict)
 
         # update pairsDict object
         pairsDict[tuple(dates)] = ifgramObj
@@ -561,7 +567,7 @@ def prepare_metadata(inpsDict):
         elif processor == 'snap':
             from mintpy import prep_snap as prep_module
 
-        # run prep_module
+        # run prep_{processor} module
         for key in [i for i in inpsDict.keys() if (i.startswith('mintpy.load.') and i.endswith('File'))]:
             if len(glob.glob(str(inpsDict[key]))) > 0:
                 # print command line

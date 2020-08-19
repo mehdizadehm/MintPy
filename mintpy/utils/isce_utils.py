@@ -149,7 +149,7 @@ def load_product(xmlname):
 
 def extract_isce_metadata(meta_file, geom_dir=None, rsc_file=None, update_mode=True):
     """Extract metadata from ISCE stack products
-    Parameters: meta_file : str, path of metadata file, master/IW1.xml or masterShelve/data.dat
+    Parameters: meta_file : str, path of metadata file, reference/IW1.xml or referenceShelve/data.dat
                 geom_dir  : str, path of geometry directory.
                 rsc_file  : str, output file name of ROIPAC format rsc file. None for not write to disk.
     Returns:    metadata  : dict
@@ -191,8 +191,9 @@ def extract_isce_metadata(meta_file, geom_dir=None, rsc_file=None, update_mode=T
 
 def extract_tops_metadata(xml_file):
     """Read metadata from xml file for Sentinel-1/TOPS
-    Parameters: xml_file : str, path of the .xml file, i.e. master/IW1.xml
+    Parameters: xml_file : str, path of the .xml file, i.e. reference/IW1.xml
     Returns:    meta     : dict, metadata
+                burst    : isceobj.Sensor.TOPS.BurstSLC.BurstSLC object
     """
     import isce
     import isceobj
@@ -212,6 +213,7 @@ def extract_tops_metadata(xml_file):
     metadata['polarization'] = burst.polarization
     metadata['trackNumber'] = burst.trackNumber
     metadata['orbitNumber'] = burst.orbitNumber
+    metadata['PLATFORM'] = sensor.standardize_sensor_name(obj.spacecraftName)
 
     time_seconds = (burst.burstStartUTC.hour * 3600.0 +
                     burst.burstStartUTC.minute * 60.0 +
@@ -230,8 +232,8 @@ def extract_tops_metadata(xml_file):
     iw_str = 'IW2'
     if os.path.basename(xml_file).startswith('IW'):
         iw_str = os.path.splitext(os.path.basename(xml_file))[0]
-    metadata['azimuthResolution'] = sensor.SENSOR_DICT['sen'][iw_str]['azimuthResolution']
-    metadata['rangeResolution'] = sensor.SENSOR_DICT['sen'][iw_str]['rangeResolution']
+    metadata['azimuthResolution'] = sensor.SENSOR_DICT['sen'][iw_str]['azimuth_resolution']
+    metadata['rangeResolution'] = sensor.SENSOR_DICT['sen'][iw_str]['range_resolution']
 
     refElp = Planet(pname='Earth').ellipsoid
     llh = refElp.xyz_to_llh(peg.getPosition())
@@ -256,8 +258,9 @@ def extract_tops_metadata(xml_file):
 
 def extract_stripmap_metadata(meta_file):
     """Read metadata from shelve file for StripMap stack from ISCE
-    Parameters: meta_file : str, path of the shelve file, i.e. masterShelve/data.dat
+    Parameters: meta_file : str, path of the shelve file, i.e. referenceShelve/data.dat
     Returns:    meta      : dict, metadata
+                frame     : isceobj.Scene.Frame.Frame object
     """
     import isce
     import isceobj
@@ -265,8 +268,8 @@ def extract_stripmap_metadata(meta_file):
 
     if os.path.basename(meta_file).startswith('data'):
         # shelve file from stripmapStack
-        # masterShelve/data     for uavsar
-        # masterShelve/data.dat for all the others
+        # referenceShelve/data     for uavsar
+        # referenceShelve/data.dat for all the others
         fbase = os.path.splitext(meta_file)[0]
         with shelve.open(fbase, flag='r') as mdb:
             frame = mdb['frame']
@@ -288,6 +291,7 @@ def extract_stripmap_metadata(meta_file):
         metadata['polarization'] = metadata['polarization'][2:4]
     metadata['trackNumber'] = frame.trackNumber
     metadata['orbitNumber'] = frame.orbitNumber
+    metadata['PLATFORM'] = sensor.standardize_sensor_name(frame.platform.getSpacecraftName())
 
     time_seconds = (frame.sensingStart.hour * 3600.0 + 
                     frame.sensingStart.minute * 60.0 + 
