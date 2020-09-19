@@ -11,6 +11,5 @@ docs/resources/*.pdf
 isce.log
 mintpy/dev/*
 mintpy/modis*
-setup.py
 site/
 test/unwrap_error_bridging/
