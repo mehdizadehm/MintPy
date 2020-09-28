@@ -626,7 +626,7 @@ def prepare_metadata(inpsDict):
             if obs_dir is not None:
                 iargs += ['-d', obs_dir, '-f', obs_file]
             print('prep_isce.py', ' '.join(iargs))
-            
+
             # run module
             prep_isce.main(iargs)
 
