@@ -390,6 +390,18 @@ def extract_stripmap_metadata(meta_file):
 
 
 def extract_alosStack_metadata(meta_file, geom_dir):
+    """Read metadata for ISCE/ALOS-2/4 stack from the following files:
+        pairs/*-*/
+            {date}.track.xml
+            f*_*/{}.frame.xml
+            f1_{frameNum}/{frameNum}.frame.xml
+            
+        pairs
+    shelve file for StripMap stack from ISCE
+    Parameters: meta_file : str, path of the shelve file, i.e. referenceShelve/data.dat
+    Returns:    meta      : dict, metadata
+                frame     : isceobj.Scene.Frame.Frame object
+    """
 
     import isce
     import isceobj
