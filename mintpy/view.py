@@ -48,6 +48,7 @@ EXAMPLE = """example:
   view.py timeseries.h5 --ex drop_date.txt      #exclude dates to plot
   view.py timeseries.h5 '*2017*'                #all acquisitions in 2017
   view.py timeseries.h5 '*2017*' '*2018*'       #all acquisitions in 2017 and 2018
+  view.py timeseries.h5 20200616_20200908       #reconstruct interferogram on the fly
 
   view.py ifgramStack.h5 coherence
   view.py ifgramStack.h5 unwrapPhase-           #unwrapPhase only in the presence of unwrapPhase_bridging
@@ -300,11 +301,17 @@ def update_inps_with_file_metadata(inps, metadata):
                                                             print_msg=inps.print_msg)
 
     # Map info - coordinate unit and map projection
+    # Use cartopy GeoAxes instance if input data is:
+    # 1. geocoded in the unit of degrees AND
+    # 2. displayed in geo-coordinates
+    # to support:
+    # 1. fancy lat/lon label
+    # 2. coastline
     inps.coord_unit = metadata.get('Y_UNIT', 'degrees').lower()
     if (inps.geo_box
             and inps.fig_coord == 'geo'
             and inps.coord_unit.startswith('deg')
-            and inps.lalo_label):
+            and (inps.lalo_label or inps.coastline)):
         inps.proj_obj = eval('ccrs.{}()'.format(inps.map_projection))
     else:
         inps.proj_obj = None
@@ -347,13 +354,21 @@ def update_inps_with_file_metadata(inps, metadata):
 
 ##################################################################################################
 def update_data_with_plot_inps(data, metadata, inps):
-    # Seed Point
+    # 1. spatial referencing with respect to the seed point
     if inps.ref_yx:   # and inps.ref_yx != [int(metadata['REF_Y']), int(metadata['REF_X'])]:
+        # update ref_y/x to subset
         try:
             ref_y = inps.ref_yx[0] - inps.pix_box[1]
             ref_x = inps.ref_yx[1] - inps.pix_box[0]
         except:
             pass
+
+        # update ref_y/x to multilooking
+        if inps.multilook_num > 1:
+            ref_y = int((ref_y - int(inps.multilook_num / 2)) / inps.multilook_num)
+            ref_x = int((ref_x - int(inps.multilook_num / 2)) / inps.multilook_num)
+
+        # applying spatial referencing
         if len(data.shape) == 2:
             data -= data[ref_y, ref_x]
         elif len(data.shape) == 3:
@@ -363,7 +378,7 @@ def update_data_with_plot_inps(data, metadata, inps):
     else:
         inps.ref_yx = None
 
-    # Convert data to display unit and wrap
+    # 2. scale data based on the display unit and re-wrap
     (data,
      inps.disp_unit,
      inps.disp_scale,
@@ -376,7 +391,7 @@ def update_data_with_plot_inps(data, metadata, inps):
     if inps.wrap:
         inps.vlim = inps.wrap_range
 
-    # 1.6 Min / Max - Data/Display
+    # 3. update display min/max
     inps.dlim = [np.nanmin(data), np.nanmax(data)]
     if not inps.vlim: # and data.ndim < 3:
         inps.vlim = [np.nanmin(data), np.nanmax(data)]
@@ -435,9 +450,10 @@ def plot_slice(ax, data, metadata, inps=None):
             vprint('map projection: {}'.format(inps.map_projection))
 
             # Draw coastline using cartopy resolution parameters
-            if inps.coastline != "no":
+            if inps.coastline:
                 vprint('draw coast line with resolution: {}'.format(inps.coastline))
                 ax.coastlines(resolution=inps.coastline)
+                inps.lalo_label = True
 
             # Plot DEM
             if inps.dem_file:
@@ -621,6 +637,20 @@ def plot_slice(ax, data, metadata, inps=None):
 
         # Status bar
         # extent is (-0.5, -0.5, width-0.5, length-0.5)
+
+        # read lats/lons if exist
+        geom_file = os.path.join(os.path.dirname(metadata['FILE_PATH']), 'inputs/geometryRadar.h5')
+        if os.path.isfile(geom_file):
+            try:
+                lats = readfile.read(geom_file, datasetName='latitude',  box=inps.pix_box)[0]
+                lons = readfile.read(geom_file, datasetName='longitude', box=inps.pix_box)[0]
+            except:
+                msg = 'WARNING: no latitude / longitude found in file: {}'.format(os.path.basename(geom_file))
+                msg += ', skip showing lat/lon in the status bar.'
+                vprint(msg)
+        else:
+            geom_file = None
+
         def format_coord(x, y):
             msg = 'x={:.1f}, y={:.1f}'.format(x, y)
             col = int(np.rint(x - inps.pix_box[0]))
@@ -631,7 +661,9 @@ def plot_slice(ax, data, metadata, inps=None):
                 if inps.dem_file:
                     h = dem[row, col]
                     msg += ', h={:.0f} m'.format(h)
-            #msg += ', v ='
+                # lat/lon
+                if geom_file:
+                    msg += ', lat={:.4f}, lon={:.4f}'.format(lats[row, col], lons[row, col])
             return msg
         ax.format_coord = format_coord
 
@@ -743,12 +775,19 @@ def read_dataset_input(inps):
     if len(inps.dset) > 0 or len(inps.dsetNumList) > 0:
         # message
         if len(inps.dset) > 0:
-            print('input dataset: "{}"'.format(inps.dset))
+            vprint('input dataset: "{}"'.format(inps.dset))
 
-        # search
+        # special rule for special file types
         if inps.key == 'velocity':
             inps.search_dset = False
             vprint('turning glob search OFF for {} file'.format(inps.key))
+
+        elif inps.key == 'timeseries' and len(inps.dset) == 1 and '_' in inps.dset[0]:
+            date1, date2 = inps.dset[0].split('_')
+            inps.dset = [date2]
+            inps.ref_date = date1
+
+        # search
         inps.dsetNumList = search_dataset_input(inps.sliceList,
                                                 inps.dset,
                                                 inps.dsetNumList,
@@ -770,6 +809,7 @@ def read_dataset_input(inps):
             inps.dset = [obj.sliceList[0].split('-')[0]]
         else:
             inps.dset = inps.sliceList
+
         inps.dsetNumList = search_dataset_input(inps.sliceList,
                                                 inps.dset,
                                                 inps.dsetNumList,
@@ -789,10 +829,12 @@ def read_dataset_input(inps):
     if inps.ref_date:
         if inps.key not in timeseriesKeyNames:
             inps.ref_date = None
+
         ref_date = search_dataset_input(inps.sliceList,
                                         [inps.ref_date],
                                         [],
                                         inps.search_dset)[0][0]
+
         if not ref_date:
             vprint('WARNING: input reference date is not included in input file!')
             vprint('input reference date: '+inps.ref_date)
@@ -915,22 +957,31 @@ def update_figure_setting(inps):
 def read_data4figure(i_start, i_end, inps, metadata):
     """Read multiple datasets for one figure into 3D matrix based on i_start/end"""
     data = np.zeros((i_end - i_start,
-                     inps.pix_box[3] - inps.pix_box[1],
-                     inps.pix_box[2] - inps.pix_box[0]))
+                     np.rint((inps.pix_box[3] - inps.pix_box[1]) / inps.multilook_num - 1e-4).astype(int),
+                     np.rint((inps.pix_box[2] - inps.pix_box[0]) / inps.multilook_num - 1e-4).astype(int),
+                    ), dtype=np.float32)
 
     # fast reading for single dataset type
     if (len(inps.dsetFamilyList) == 1
             and inps.key in ['timeseries', 'giantTimeseries', 'ifgramStack', 'HDFEOS', 'geometry']):
+
         vprint('reading data as a 3D matrix ...')
         dset_list = [inps.dset[i] for i in range(i_start, i_end)]
-        data[:] = readfile.read(inps.file, datasetName=dset_list, box=inps.pix_box)[0]
+        data[:] = readfile.read(inps.file,
+                                datasetName=dset_list,
+                                box=inps.pix_box,
+                                xstep=inps.multilook_num,
+                                ystep=inps.multilook_num)[0]
 
         if inps.key == 'ifgramStack':
             # reference pixel info in unwrapPhase
             if inps.dsetFamilyList[0].startswith('unwrapPhase') and inps.file_ref_yx:
                 ref_y, ref_x = inps.file_ref_yx
                 ref_box = (ref_x, ref_y, ref_x+1, ref_y+1)
-                ref_data = readfile.read(inps.file, datasetName=dset_list, box=ref_box, print_msg=False)[0]
+                ref_data = readfile.read(inps.file,
+                                         datasetName=dset_list,
+                                         box=ref_box,
+                                         print_msg=False)[0]
                 for i in range(data.shape[0]):
                     mask = data[i, :, :] != 0.
                     data[i, mask] -= ref_data[i]
@@ -943,7 +994,9 @@ def read_data4figure(i_start, i_end, inps, metadata):
             d = readfile.read(inps.file,
                               datasetName=inps.dset[i],
                               box=inps.pix_box,
-                              print_msg=False)[0]
+                              print_msg=False,
+                              xstep=inps.multilook_num,
+                              ystep=inps.multilook_num)[0]
             data[i - i_start, :, :] = d
             prog_bar.update(i - i_start + 1, suffix=inps.dset[i].split('/')[-1])
         prog_bar.close()
@@ -954,33 +1007,29 @@ def read_data4figure(i_start, i_end, inps, metadata):
         ref_data = readfile.read(inps.file,
                                  datasetName=inps.ref_date,
                                  box=inps.pix_box,
-                                 print_msg=False)[0]
+                                 print_msg=False,
+                                 xstep=inps.multilook_num,
+                                 ystep=inps.multilook_num)[0]
         data -= ref_data
 
-    # v/dlim, adjust data if all subplots share the same unit
-    # This could be:
+    # check if all subplots share the same data unit, they could have/be:
     # 1) the same type OR
     # 2) velocity or timeseries OR
     # 3) horizontal/vertical output from asc_desc2horz_vert.py
     # 4) data/model output from load_gbis.py OR
     # 5) binary files with multiple undefined datasets, as band1, band2, etc.
-    if (len(inps.dsetFamilyList) == 1 
+    if (len(inps.dsetFamilyList) == 1
             or inps.key in ['velocity', 'timeseries', 'inversion']
             or all(d in inps.dsetFamilyList for d in ['horizontal', 'vertical'])
             or inps.dsetFamilyList == ['data','model','residual']
             or inps.dsetFamilyList == ['band{}'.format(i+1) for i in range(len(inps.dsetFamilyList))]):
-        data, inps = update_data_with_plot_inps(data, metadata, inps)
-        if (not inps.vlim
-                and not (inps.dsetFamilyList[0].startswith('unwrap') and not inps.file_ref_yx)
-                and inps.dsetFamilyList[0] not in ['bperp']):
-            data_mli = multilook_data(data, 10, 10)
-            inps.vlim = [np.nanmin(data_mli), np.nanmax(data_mli)]
-            del data_mli
-    inps.dlim = [np.nanmin(data), np.nanmax(data)]
+        same_unit4all_subplots = True
+    else:
+        same_unit4all_subplots = False
 
-    # multilook
-    if inps.multilook:
-        data = multilook_data(data, inps.multilook_num, inps.multilook_num)
+    # adjust data due to spatial referencing and unit related scaling
+    if same_unit4all_subplots:
+        data, inps = update_data_with_plot_inps(data, metadata, inps)
 
     # mask
     if inps.msk is not None:
@@ -991,6 +1040,17 @@ def read_data4figure(i_start, i_end, inps, metadata):
     if inps.zero_mask:
         vprint('masking pixels with zero value')
         data = np.ma.masked_where(data == 0., data)
+
+    # update display min/max
+    if (same_unit4all_subplots
+            and all(arg not in sys.argv for arg in ['-v', '--vlim', '--wrap'])
+            and not (inps.dsetFamilyList[0].startswith('unwrap') and not inps.file_ref_yx)
+            and inps.dsetFamilyList[0] not in ['bperp']):
+        data_mli = multilook_data(data, 10, 10)
+        inps.vlim = [np.nanmin(data_mli), np.nanmax(data_mli)]
+        del data_mli
+    inps.dlim = [np.nanmin(data), np.nanmax(data)]
+
     return data
 
 
@@ -1067,7 +1127,7 @@ def plot_subplot4figure(i, inps, ax, data, metadata):
             if num_subplot <= 20:
                 subplot_title = '{}\n{}'.format(i, title_str)
             elif num_subplot <= 50:
-                subplot_title = title_str
+                subplot_title = title_str.replace('_','\n').replace('-','\n')
             else:
                 subplot_title = '{}'.format(i)
 
@@ -1196,12 +1256,14 @@ def prepare4multi_subplots(inps, metadata):
         for dsFamily in inps.dsetFamilyList:
             if any(i in dsFamily.lower() for i in ['mask', 'coord']):
                 auto_multilook = False
+
         if auto_multilook:
             inps.multilook, inps.multilook_num = check_multilook_input(inps.pix_box,
                                                                        inps.fig_row_num,
                                                                        inps.fig_col_num)
         if inps.msk is not None:
-            inps.msk = multilook_data(inps.msk, inps.multilook_num, inps.multilook_num)
+            inps.msk = inps.msk[int(inps.multilook_num/2)::inps.multilook_num,
+                                int(inps.multilook_num/2)::inps.multilook_num]
 
     # Reference pixel for timeseries and ifgramStack
     #metadata = readfile.read_attribute(inps.file)
@@ -1238,9 +1300,9 @@ def prepare4multi_subplots(inps, metadata):
             dem = readfile.read(inps.dem_file,
                                 datasetName='height',
                                 box=inps.pix_box,
-                                print_msg=False)[0]
-            if inps.multilook:
-                dem = multilook_data(dem, inps.multilook_num, inps.multilook_num)
+                                print_msg=False,
+                                xstep=inps.multilook_num,
+                                ystep=inps.multilook_num)[0]
             (inps.dem_shade,
              inps.dem_contour,
              inps.dem_contour_seq) = pp.prepare_dem_background(dem=dem,
@@ -1261,7 +1323,8 @@ def prep_slice(cmd, auto_fig=False):
                 atr  : dict, metadata
                 inps : namespace, input argument for plot setup
     Example:
-        fig, ax = plt.subplots(figsize=[4, 3], projection=ccrs.PlateCarree())
+        subplot_kw = dict(projection=ccrs.PlateCarree())
+        fig, ax = plt.subplots(figsize=[4, 3], subplot_kw=subplot_kw)
         geo_box = (-91.670, -0.255, -91.370, -0.515)    # W, N, E, S
         cmd = 'view.py geo_velocity.h5 velocity --mask geo_maskTempCoh.h5 '
         cmd += '--sub-lon {w} {e} --sub-lat {s} {n} '.format(w=geo_box[0], n=geo_box[1], e=geo_box[2], s=geo_box[3])

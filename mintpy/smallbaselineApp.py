@@ -102,7 +102,7 @@ def cmd_line_parse(iargs=None):
 
     # -v (print software version)
     if inps.version:
-        print(mintpy.version.description)
+        print(mintpy.version.release_description)
         sys.exit(0)
 
     # check all input template files
@@ -166,7 +166,7 @@ def read_inps2run_steps(inps, step_list=STEP_LIST):
     if len(run_steps) > 0:
         # for single step - compact version info
         if len(run_steps) == 1:
-            print(mintpy.version.description)
+            print(mintpy.version.release_description)
         else:
             print(mintpy.version.logo)
 
@@ -235,7 +235,7 @@ class TimeSeriesAnalysis:
         self._read_template()
 
         # 4. Copy the plot shell file
-        sh_file = os.path.join(os.path.dirname(__file__), '../sh/plot_smallbaselineApp.sh')
+        sh_file = os.path.join(os.path.dirname(__file__), 'sh/plot_smallbaselineApp.sh')
 
         def grab_latest_update_date(fname, prefix='# Latest update:'):
             try:
@@ -342,25 +342,18 @@ class TimeSeriesAnalysis:
         self._copy_aux_file()
 
         # 2) loading data
-        stack_processor = self.template['mintpy.load.processor'].lower()
-        if stack_processor == 'aria':
-            from mintpy import prep_aria
-            iargs = ['--template', self.templateFile, '--update']
-            prep_aria.main(iargs)
+        # compose list of input arguments
+        # instead of using command line then split
+        # to support path with whitespace
+        iargs = ['--template', self.templateFile]
+        if self.customTemplateFile:
+            iargs += [self.customTemplateFile]
+        if self.projectName:
+            iargs += ['--project', self.projectName]
 
-        else:
-            # compose list of input arguments
-            # instead of using command line then split
-            # to support path with whitespace
-            iargs = ['--template', self.templateFile]
-            if self.customTemplateFile:
-                iargs += [self.customTemplateFile]
-            if self.projectName:
-                iargs += ['--project', self.projectName]
-
-            # run command line
-            print('load_data.py', ' '.join(iargs))
-            mintpy.load_data.main(iargs)
+        # run command line
+        print('load_data.py', ' '.join(iargs))
+        mintpy.load_data.main(iargs)
 
         # come back to working directory
         os.chdir(self.workDir)
@@ -418,9 +411,9 @@ class TimeSeriesAnalysis:
         """Modify network of interferograms before the network inversion."""
         # check the existence of ifgramStack.h5
         stack_file, geom_file = ut.check_loaded_dataset(self.workDir, print_msg=False)[1:3]
-        coh_txt = '{}_coherence_spatialAvg.txt'.format(os.path.splitext(os.path.basename(stack_file))[0])
+        coh_txt = 'coherenceSpatialAvg.txt'
         try:
-            net_fig = [i for i in ['Network.pdf', 'pic/Network.pdf'] if os.path.isfile(i)][0]
+            net_fig = [i for i in ['network.pdf', 'pic/network.pdf'] if os.path.isfile(i)][0]
         except:
             net_fig = None
 
@@ -446,20 +439,24 @@ class TimeSeriesAnalysis:
         mintpy.modify_network.main(iargs)
 
         # 3) plot network
+        iargs = [stack_file, '-t', self.templateFile, '--nodisplay']
+
+        dsNames = readfile.get_dataset_list(stack_file)
+        if any('phase' in i.lower() for i in dsNames):
+            iargs += ['-d', 'coherence', '-v', '0.2', '1.0']
+        elif any('offset' in i.lower() for i in dsNames):
+            iargs += ['-d', 'offsetSNR', '-v', '0', '20']
+
+        print('\nplot_network.py', ' '.join(iargs))
+
+        # run
         if self.template['mintpy.plot'] and plot:
-            iargs = [stack_file, '-t', self.templateFile, '--nodisplay']
-
-            dsNames = readfile.get_dataset_list(stack_file)
-            if any('phase' in i.lower() for i in dsNames):
-                iargs += ['-d', 'coherence', '-v', '0.2', '1.0']
-            elif any('offset' in i.lower() for i in dsNames):
-                iargs += ['-d', 'offsetSNR', '-v', '0', '20']
-
-            print('\nplot_network.py', ' '.join(iargs))
             if ut.run_or_skip(out_file=net_fig,
                               in_file=[stack_file, coh_txt, self.templateFile],
                               check_readable=False) == 'run':
                 mintpy.plot_network.main(iargs)
+        else:
+            print('mintpy.plot is turned OFF, skip plotting network.')
         return
 
 
@@ -509,7 +506,7 @@ class TimeSeriesAnalysis:
     def run_quick_overview(self, step_name):
         """A quick overview on the interferogram stack for:
             1) avgPhaseVelocity.h5: possible ground deformation through interferogram stacking
-            2) numNonzeroIntClosure.h5: phase unwrapping errors through the integer ambiguity of phase closure
+            2) numTriNonzeroIntAmbiguity.h5: phase unwrapping errors through the integer ambiguity of phase closure
         """
         # check the existence of ifgramStack.h5
         stack_file = ut.check_loaded_dataset(self.workDir, print_msg=False)[1]
@@ -520,7 +517,7 @@ class TimeSeriesAnalysis:
         print('temporal_average.py', ' '.join(iargs))
         mintpy.temporal_average.main(iargs)
 
-        # 2) calculate the integer ambiguity of closure phase
+        # 2) calculate the number of interferogram triplets with non-zero integer ambiguity
         water_mask_file = 'waterMask.h5'
         iargs = [stack_file, '--water-mask', water_mask_file, '--action', 'calculate', '--update']
         print('unwrap_error_phase_closure.py', ' '.join(iargs))
@@ -904,7 +901,7 @@ class TimeSeriesAnalysis:
                 os.makedirs(out_dir, exist_ok=True)
 
                 geom_file, lookup_file = ut.check_loaded_dataset(self.workDir, print_msg=False)[2:4]
-                in_files = [geom_file, 'temporalCoherence.h5', ts_file, 'velocity.h5']
+                in_files = [geom_file, 'temporalCoherence.h5', 'avgSpatialCoh.h5', ts_file, 'velocity.h5']
                 iargs = ['-l', lookup_file, '-t', self.templateFile, '--outdir', out_dir, '--update']
                 for in_file in in_files:
                     iargs += [in_file]
@@ -972,17 +969,20 @@ class TimeSeriesAnalysis:
                 ut.add_attribute(ts_file, self.customTemplate)
 
             tcoh_file = 'temporalCoherence.h5'
-            mask_file = 'geo_maskTempCoh.h5'
+            scoh_file = 'avgSpatialCoh.h5'
+            mask_file = 'maskTempCoh.h5'
             geom_file = ut.check_loaded_dataset(self.workDir, print_msg=False)[2]
             if 'geo' in ts_file:
                 tcoh_file = './geo/geo_temporalCoherence.h5'
+                scoh_file = './geo/geo_avgSpatialCoh.h5'
                 mask_file = './geo/geo_maskTempCoh.h5'
                 geom_file = './geo/geo_{}'.format(os.path.basename(geom_file))
 
             # cmd
             print('--------------------------------------------')
             iargs = [ts_file,
-                     '-c', tcoh_file, 
+                     '--tc', tcoh_file,
+                     '--asc', scoh_file, 
                      '-m', mask_file,
                      '-g', geom_file, 
                      '-t', self.templateFile]
@@ -995,7 +995,7 @@ class TimeSeriesAnalysis:
                 hdfeos5_file = ut.get_file_list('{}_*.he5'.format(SAT))[0]
             except:
                 hdfeos5_file = None
-            if ut.run_or_skip(out_file=hdfeos5_file, in_file=[ts_file, tcoh_file, mask_file, geom_file]) == 'run':
+            if ut.run_or_skip(out_file=hdfeos5_file, in_file=[ts_file, tcoh_file, scoh_file, mask_file, geom_file]) == 'run':
                 mintpy.save_hdfeos5.main(iargs)
         else:
             print('save time-series to HDF-EOS5 format is OFF.')

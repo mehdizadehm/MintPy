@@ -12,7 +12,7 @@ import os
 import sys
 import re
 import time
-from datetime import datetime as dt
+from datetime import datetime as dt, timedelta
 import h5py
 import numpy as np
 from mintpy.utils import ptime
@@ -183,6 +183,10 @@ class timeseries:
         # time info
         self.dateFormat = ptime.get_date_str_format(self.dateList[0])
         self.times = np.array([dt.strptime(i, self.dateFormat) for i in self.dateList])
+        # add hh/mm/ss info to the datetime objects
+        if 'T' not in self.dateFormat or all(i.hour==0 and i.minute==0 for i in self.times):
+            utc_sec = float(self.metadata['CENTER_LINE_UTC'])
+            self.times = np.array([i + timedelta(seconds=utc_sec) for i in self.times])
         self.tbase = np.array([(i.days + i.seconds / (24 * 60 * 60)) 
                                for i in (self.times - self.times[self.refIndex])],
                               dtype=np.float32)
@@ -262,7 +266,7 @@ class timeseries:
             if box is None:
                 box = [0, 0, self.width, self.length]
 
-            data = ds[dateFlag, box[1]:box[3], box[0]:box[2]]
+            data = ds[:, box[1]:box[3], box[0]:box[2]][dateFlag]
             if squeeze:
                 data = np.squeeze(data)
         return data
@@ -398,13 +402,26 @@ class timeseries:
         """Calculate the Root Mean Square for each acquisition of time-series
             and output result to a text file.
         """
-        # Calculate RMS
-        data = self.read()
+        # Get date list
+        date_list = self.get_date_list()
+        num_date  = len(date_list)
+
+        # Get mask
         if maskFile and os.path.isfile(maskFile):
             print('read mask from file: '+maskFile)
             mask = singleDataset(maskFile).read()
-            data[:, mask == 0] = np.nan
-        self.rms = np.sqrt(np.nanmean(np.square(data), axis=(1, 2)))
+
+        # Calculate RMS one date at a time
+        self.rms = np.zeros(num_date) * np.nan
+        print('reading {} data from file: {} ...'.format(self.name, self.file))
+        prog_bar = ptime.progressBar(maxValue=num_date)
+        for i in range(num_date):
+            data = self.read(datasetName='{}'.format(date_list[i]), print_msg=False)
+            if maskFile and os.path.isfile(maskFile):
+                data[mask == 0] = np.nan
+            self.rms[i] = np.sqrt(np.nanmean(np.square(data), axis=(0, 1)))
+            prog_bar.update(i+1, suffix='{}/{}'.format(i+1, num_date))
+        prog_bar.close()
 
         # Write text file
         header = 'Root Mean Square in space for each acquisition of time-series\n'
@@ -449,31 +466,124 @@ class timeseries:
 
     # Functions for Unwrap error correction
     @staticmethod
-    def get_design_matrix4average_velocity(date_list, refDate=None):
+    def get_design_matrix4time_func(date_list, model=None, refDate=None):
         """design matrix/function model of linear velocity estimation
-        Parameters: date_list : list of string in YYYYMMDD format
-        Returns:    A : 2D array of int in size of (numDate, 2)
+        Parameters: date_list : list of str in YYYYMMDD format, size=num_date
+                    model     : dict of time functions, e.g.:
+                                {'polynomial' : 2,            # int, polynomial with 1 (linear), 2 (quadratic), 3 (cubic), etc.
+                                 'periodic'   : [1.0, 0.5],   # list of float, period(s) in years. 1.0 (annual), 0.5 (semiannual), etc.
+                                 'step'       : ['20061014'], # list of str, date(s) in YYYYMMDD.
+                                 ...
+                                 }
+        Returns:    A         : 2D array of design matrix in size of (num_date, num_param)
+                                num_param = (poly_deg + 1) + 2*len(periodic) + len(steps)
         """
-        # convert list of YYYYMMDD into array of years in float
-        date_format = ptime.get_date_str_format(date_list[0])
-        dt_list = [dt.strptime(i, date_format) for i in date_list]
-        yr_list = [(d.year + (d.timetuple().tm_yday - 1) / 365.25 + 
-                    d.hour / (365.25 * 24) + 
-                    d.minute / (365.25 * 24 * 60) +
-                    d.second / (365.25 * 24 * 60 * 60))
-                   for d in dt_list]
-        yr_diff = np.array(yr_list)
+
+        def get_design_matrix4polynomial_func(yr_diff, degree):
+            """design matrix/function model of linear/polynomial velocity estimation
+
+            The k! denominator makes the estimated polynomial coefficient (c_k) physically meaningful:
+                k=1 makes c_1 the velocity;
+                k=2 makes c_2 the acceleration;
+                k=3 makes c_3 the acceleration rate;
+
+            Parameters: yr_diff: time difference from refDate in decimal years
+                        degree : polynomial models: 1=linear, 2=quadratic, 3=cubic, etc.
+            Returns:    A      : 2D array of poly-coeff. in size of (num_date, degree+1)
+            """
+            A = np.zeros([len(yr_diff), degree + 1], dtype=np.float32)
+            for i in range(degree+1):
+                A[:,i] = (yr_diff**i) / np.math.factorial(i)
+
+            return A
+
+        def get_design_matrix4periodic_func(yr_diff, periods):
+            """design matrix/function model of periodic velocity estimation
+            Parameters: yr_diff : 1D array of time difference from refDate in decimal years
+                        periods : list of period in years: 1=annual, 0.5=semiannual, etc.
+            Returns:    A       : 2D array of periodic sine & cosine coeff. in size of (num_date, 2)
+            """
+            num_date = len(yr_diff)
+            num_period = len(periods)
+            A = np.zeros((num_date, 2*num_period), dtype=np.float32)
+
+            for i, period in enumerate(periods):
+                c0, c1 = 2*i, 2*i+1
+                A[:, c0] = np.cos(2*np.pi/period * yr_diff)
+                A[:, c1] = np.sin(2*np.pi/period * yr_diff)
+
+            return A
+
+
+        def get_design_matrix4step_func(date_list, step_date_list):
+            """design matrix/function model of coseismic velocity estimation
+            Parameters: date_list      : list of dates in YYYYMMDD format
+                        step_date_list : Heaviside step function(s) with date in YYYYMMDD
+            Returns:    A              : 2D array of zeros & ones in size of (num_date, num_step)
+            """
+            num_date = len(date_list)
+            num_step = len(step_date_list)
+            A = np.zeros((num_date, num_step), dtype=np.float32)
+
+            t = np.array(ptime.yyyymmdd2years(date_list))
+            t_steps = ptime.yyyymmdd2years(step_date_list)
+            for i, t_step in enumerate(t_steps):
+                A[:, i] = np.array(t > t_step).flatten()
+
+            return A
+
+        ## prepare time info
+        # convert list of date into array of years in float
+        yr_diff = np.array(ptime.yyyymmdd2years(date_list))
 
         # reference date
         if refDate is None:
             refDate = date_list[0]
         yr_diff -= yr_diff[date_list.index(refDate)]
 
-        A = np.ones([len(date_list), 2], dtype=np.float32)
-        A[:, 0] = yr_diff
+        ## construct design matrix A
+        # default model value
+        if not model:
+            model = {'polynomial' : 1}
+
+        # read the models
+        poly_deg = model.get('polynomial', 0)
+        periods  = model.get('periodic', [])
+        steps    = model.get('step', [])
+        num_period = len(periods)
+        num_step = len(steps)
+
+        num_param = (poly_deg + 1) + (2 * num_period) + num_step
+        if num_param <= 1:
+            raise ValueError('NO time functions specified!')
+
+        # initialize the design matrix
+        num_date = len(yr_diff)
+        A = np.zeros((num_date, num_param), dtype=np.float32)
+        c0 = 0
+
+        # update linear/polynomial term(s)
+        if poly_deg > 0:
+            c1 = c0 + poly_deg + 1
+            A[:, c0:c1] = get_design_matrix4polynomial_func(yr_diff, poly_deg)
+            c0 = c1
+
+        # update periodic term(s)
+        if num_period > 0:
+            c1 = c0 + 2 * num_period
+            A[:, c0:c1] = get_design_matrix4periodic_func(yr_diff, periods)
+            c0 = c1
+
+        # update coseismic/step term(s)
+        if num_step > 0:
+            c1 = c0 + num_step
+            A[:, c0:c1] = get_design_matrix4step_func(date_list, steps)
+            c0 = c1
+
         return A
 
 ################################ timeseries class end ##################################
+
 
 
 
@@ -591,7 +701,7 @@ class geometry:
                 else:
                     for e in datasetName:
                         dateFlag[self.dateList.index(e)] = True
-                data = ds[dateFlag, box[1]:box[3], box[0]:box[2]]
+                data = ds[:, box[1]:box[3], box[0]:box[2]][dateFlag]
                 data = np.squeeze(data)
         return data
 ################################# geometry class end ###################################
@@ -773,7 +883,7 @@ class ifgramStack:
             if box is None:
                 box = (0, 0, self.width, self.length)
 
-            data = ds[dateFlag, box[1]:box[3], box[0]:box[2]]
+            data = ds[:, box[1]:box[3], box[0]:box[2]][dateFlag]
             data = np.squeeze(data)
         return data
 
@@ -858,7 +968,7 @@ class ifgramStack:
         self.open(print_msg=False)
         if skip_reference:
             ref_phase = np.zeros(self.get_size(dropIfgram=dropIfgram)[0], np.float32)
-            print('skip checking reference pixel info - This is for SIMULATION ONLY.')
+            print('skip checking reference pixel info - This is for offset and testing ONLY.')
         elif 'REF_Y' not in self.metadata.keys():
             raise ValueError('No REF_X/Y found!\nrun reference_point.py to select reference pixel.')
         else:
@@ -896,43 +1006,57 @@ class ifgramStack:
             print('')
         return mask
 
-    def temporal_average(self, datasetName='coherence', dropIfgram=True):
+    def temporal_average(self, datasetName='coherence', dropIfgram=True, row_step=200):
         self.open(print_msg=False)
         if datasetName is None:
             datasetName = 'coherence'
         print('calculate the temporal average of {} in file {} ...'.format(datasetName, self.file))
+
+        # index of pairs to read
+        ifgram_flag = np.ones(self.numIfgram, dtype=np.bool_)
+        if dropIfgram:
+            ifgram_flag = self.dropIfgram
+            if np.all(ifgram_flag == 0.):
+                raise Exception(('ALL interferograms are marked as dropped, '
+                                 'can not calculate temporal average.'))
+
+        # temporal baseline for phase
+        # with unit of years (float64 for very short tbase of UAVSAR data)
         if 'unwrapPhase' in datasetName:
             phase2range = -1 * float(self.metadata['WAVELENGTH']) / (4.0 * np.pi)
-            # temporal baseline in years (float64 for very short tbase of UAVSAR data)
             tbase = np.array(self.tbaseIfgram, dtype=np.float64) / 365.25
+            tbase = tbase[ifgram_flag]
 
         with h5py.File(self.file, 'r') as f:
             dset = f[datasetName]
-            num_ifgram, length, width = dset.shape
-            dmean = np.zeros((length, width), dtype=np.float32)
-            drop_ifgram_flag = np.ones(num_ifgram, dtype=np.bool_)
-            if dropIfgram:
-                drop_ifgram_flag = self.dropIfgram
-                if np.all(drop_ifgram_flag == 0.):
-                    raise Exception(('ALL interferograms are marked as dropped, '
-                                     'can not calculate temporal average.'))
 
-            num2read = np.sum(drop_ifgram_flag)
-            idx2read = np.where(drop_ifgram_flag)[0]
-            for i in range(num2read):
-                idx = idx2read[i]
-                data = dset[idx, :, :]
+            # reference value for phase
+            ref_val = None
+            if 'unwrapPhase' in datasetName and self.refY:
+                ref_val = dset[:, self.refY, self.refX][ifgram_flag]
+
+            # calculate lines by lines
+            num_step = np.ceil(self.length / row_step).astype(int)
+            dmean = np.zeros(dset.shape[1:3], dtype=np.float32)
+            for i in range(num_step):
+                r0 = i * row_step
+                r1 = min(r0 + row_step, self.length)
+                data = dset[:, r0:r1, :][ifgram_flag]
+
+                # referencing / normalizing for phase
                 if 'unwrapPhase' in datasetName:
                     if self.refY:
                         try:
-                            data -= data[self.refY, self.refX]
+                            data -= np.tile(ref_val.reshape(-1, 1, 1), (1, data.shape[1], data.shape[2]))
                         except:
                             pass
-                    data *= (phase2range / tbase[idx])
-                dmean += data
-                sys.stdout.write('\rreading interferogram {}/{} ...'.format(i+1, num2read))
+                    for j in range(data.shape[0]):
+                        data[j,:,:] *= (phase2range / tbase[j])
+
+                # use nanmean to better handle NaN values
+                dmean[r0:r1, :] = np.nanmean(data, axis=0)
+                sys.stdout.write('\rreading & calculating lines {}/{} ...'.format(r1, self.length))
                 sys.stdout.flush()
-            dmean *= 1./np.sum(self.dropIfgram)
             print('')
         return dmean
 
@@ -1007,10 +1131,12 @@ class ifgramStack:
     @staticmethod
     def get_design_matrix4timeseries(date12_list, refDate=None):
         """Return design matrix of the input ifgramStack for timeseries estimation
-        Parameters: date12_list : list of string in YYYYMMDD_YYYYMMDD format
-                    refDate : str, date in YYYYMMDD format
-        Returns:    A : 2D array of float32 in size of (num_ifgram, num_date-1)
-                    B : 2D array of float32 in size of (num_ifgram, num_date-1)
+        Parameters: date12_list - list of string in YYYYMMDD_YYYYMMDD format
+                    refDate     - str, date in YYYYMMDD format
+                                  set to None for the 1st date
+                                  set to 'no' to disable reference date
+        Returns:    A - 2D array of float32 in size of (num_ifgram, num_date-1)
+                    B - 2D array of float32 in size of (num_ifgram, num_date-1)
         Examples:   obj = ifgramStack('./inputs/ifgramStack.h5')
                     A, B = obj.get_design_matrix4timeseries(obj.get_date12_list(dropIfgram=True))
                     A = ifgramStack.get_design_matrix4timeseries(date12_list, refDate='20101022')[0]
@@ -1040,13 +1166,19 @@ class ifgramStack:
             B[i, ind1:ind2] = tbase[ind1+1:ind2+1] - tbase[ind1:ind2]
 
         # Remove reference date as it can not be resolved
-        if refDate is None:
-            refDate = date_list[0]
-        if refDate:
-            ind_r = date_list.index(refDate)
-            A = np.hstack((A[:, 0:ind_r], A[:, (ind_r+1):]))
-            B = B[:, :-1]
+        if refDate != 'no':
+            # default refDate
+            if refDate is None:
+                refDate = date_list[0]
+
+            # apply refDate
+            if refDate:
+                ind_r = date_list.index(refDate)
+                A = np.hstack((A[:, 0:ind_r], A[:, (ind_r+1):]))
+                B = B[:, :-1]
+
         return A, B
+
 
     def get_perp_baseline_timeseries(self, dropIfgram=True):
         """Get spatial perpendicular baseline in timeseries from ifgramStack, ignoring dropped ifgrams"""
@@ -1238,7 +1370,7 @@ class HDFEOS:
                 else:
                     for e in datasetName:
                         dateFlag[self.dateList.index(e)] = True
-                data = ds[dateFlag, box[1]:box[3], box[0]:box[2]]
+                data = ds[:, box[1]:box[3], box[0]:box[2]][dateFlag]
                 data = np.squeeze(data)
         return data
 ################################# HDF-EOS5 class end ###################################

@@ -197,8 +197,8 @@ def azimuth_ground_resolution(atr):
         proc = 'isce'
     if proc in ['roipac', 'isce']:
         Re = float(atr['EARTH_RADIUS'])
-        Height = float(atr['HEIGHT'])
-        az_step = float(atr['AZIMUTH_PIXEL_SIZE']) * Re/(Re+Height)
+        height = float(atr['HEIGHT'])
+        az_step = float(atr['AZIMUTH_PIXEL_SIZE']) * Re / (Re + height)
     elif proc == 'gamma':
         az_step = float(atr['AZIMUTH_PIXEL_SIZE'])
     return az_step
@@ -233,6 +233,31 @@ def touch(fname_list, times=None):
 
 
 #################################### Geometry ##########################################
+
+def vtec2range_delay(vtec, inc_angle_iono, freq):
+    """Calculate/predict the range delay in SAR from TEC in zenith direction
+
+    L-band: 1.2575 GHz (ALOS2, NISAR-L)
+    S-band: 3.2 GHz    (NISAR-S)
+    C-band: 5.405 GHz  (Sentinel-1)
+
+    Parameters: vtec           - float, zenith TEC in TECU
+                inc_angle_iono - float/np.ndarray, incidence angle at the ionospheric shell in deg
+                freq           - float, radar carrier frequency in Hz.
+    Returns:    rg_delay       - float/np.ndarray, predicted range delay in meters
+    """
+    # ignore no-data value in inc_angle
+    if type(inc_angle_iono) is np.ndarray:
+        inc_angle_iono[inc_angle_iono == 0] = np.nan
+
+    # convert to TEC in LOS based on equation (3) in Chen and Zebker (2012)
+    tec = vtec / np.cos(inc_angle_iono * np.pi / 180.0)
+
+    # calculate range delay based on equation (1) in Chen and Zebker (2012)
+    range_delay = (tec * 1e16 * K / (freq**2)).astype(np.float32)
+
+    return range_delay
+
 
 def lalo_ground2iono_shell_along_los(lat, lon, inc_angle=30, head_angle=-168, iono_height=450e3):
     """Convert the lat/lon of a point on the ground to the ionosphere thin-shell 
@@ -727,18 +752,46 @@ def check_parallel(file_num=1, print_msg=True, maxParallelNum=8):
 
 
 #################################### Math / Statistics ###################################
+def median_abs_deviation(data, center=None, scale=0.67449):
+    """Compute the median absolute deviation of the data along the LAST axis.
+
+    This function is also included as:
+        scipy.stats.median_abs_deviation() in scipy v1.5.0
+            https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.median_abs_deviation.html
+        statsmodels.robust.mad() in statsmodels
+            https://www.statsmodels.org/dev/generated/statsmodels.robust.scale.mad.html
+
+    Parameters: data   - 1/2D np.ndarray, input array
+                center - 0/1D np.ndarray or None
+                scale  - float, the normalization constant
+    Returns:    mad    - 0/1D np.ndarray
+    """
+    # compute MAD over 1/2D matrix only
+    data = np.array(data)
+    if data.ndim > 2:
+        ntime = data.shape[0]
+        data = data.reshape(ntime, -1)
+
+    # default center value: median
+    if center is None:
+        center = np.nanmedian(data, axis=-1)
+
+    # calculation
+    if data.ndim == 2:
+        center = np.tile(center.reshape(-1,1), (1, data.shape[1]))
+    mad = np.nanmedian(np.abs(data - center), axis=-1) * scale
+    return mad
+
+
 def median_abs_deviation_threshold(data, center=None, cutoff=3.):
     """calculate rms_threshold based on the standardised residual
-    outlier detection with median absolute deviation.
-    https://www.statsmodels.org/dev/generated/statsmodels.robust.scale.mad.html
+
+    Outlier detection with median absolute deviation.
     """
-    data = np.array(data)
     if center is None:
-        center = np.median(data)
-    #from statsmodels.robust import mad
-    #data_mad = mad(data, center=center)
-    data_mad = np.median(np.abs(data - center)) / 0.67448975019608171
-    threshold = center + cutoff * data_mad
+        center = np.nanmedian(data)
+    mad = median_abs_deviation(data, center=center)
+    threshold = center + cutoff * mad
     return threshold
 
 

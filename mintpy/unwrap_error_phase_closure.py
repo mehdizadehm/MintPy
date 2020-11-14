@@ -172,9 +172,9 @@ def run_or_skip(inps):
 
 
 ##########################################################################################
-def calc_num_nonzero_integer_closure_phase(ifgram_file, mask_file=None, dsName='unwrapPhase',
-                                           out_file=None, step=50, update_mode=True):
-    """Calculate the number of non-zero integer ambiguity of closure phase.
+def calc_num_triplet_with_nonzero_integer_ambiguity(ifgram_file, mask_file=None, dsName='unwrapPhase',
+                                                    out_file=None, step=50, update_mode=True):
+    """Calculate the number of triplets with non-zero integer ambiguity of closure phase.
 
     T_int as shown in equation (8-9) and inline in Yunjun et al. (2019, CAGEO).
 
@@ -185,22 +185,48 @@ def calc_num_nonzero_integer_closure_phase(ifgram_file, mask_file=None, dsName='
                 step        - int, number of row in each block to calculate T_int
                 update_mode - bool
     Returns:    out_file    - str, custom output filename
-    Example:    calc_num_nonzero_integer_closure_phase('inputs/ifgramStack.h5', mask_file='waterMask.h5')
+    Example:    calc_num_triplet_with_nonzero_integer_ambiguity('inputs/ifgramStack.h5', mask_file='waterMask.h5')
     """
 
     # default output file path
+    out_dir = os.path.dirname(os.path.dirname(ifgram_file))
     if out_file is None:
-        out_dir = os.path.dirname(os.path.dirname(ifgram_file))
         if dsName == 'unwrapPhase':
             # skip the default dsName in output filename
-            out_file = 'numNonzeroIntClosure.h5'
+            out_file = 'numTriNonzeroIntAmbiguity.h5'
         else:
-            out_file = 'numNonzeroIntClosure4{}.h5'.format(dsName)
+            out_file = 'numTriNonzeroIntAmbiguity4{}.h5'.format(dsName)
         out_file = os.path.join(out_dir, out_file)
 
+    # update mode
     if update_mode and os.path.isfile(out_file):
-        print('output file "{}" already exists, skip re-calculating.'.format(out_file))
-        return out_file
+        print('update mode: ON')
+        print('1) output file "{}" already exists'.format(out_file))
+        flag = 'skip'
+
+        # check modification time
+        with h5py.File(ifgram_file, 'r') as f:
+            ti = float(f[dsName].attrs.get('MODIFICATION_TIME', os.path.getmtime(ifgram_file)))
+        to = os.path.getmtime(out_file)
+        if ti > to:
+            print('2) output file is NOT newer than input dataset')
+            flag = 'run'
+        else:
+            print('2) output file is newer than input dataset')
+
+        # check REF_Y/X
+        key_list = ['REF_Y', 'REF_X']
+        atri = readfile.read_attribute(ifgram_file)
+        atro = readfile.read_attribute(out_file)
+        if not all(atri[i] == atro[i] for i in key_list):
+            print('3) NOT all key configurations are the same: {}'.format(key_list))
+            flag = 'run'
+        else:
+            print('3) all key configurations are the same: {}'.format(key_list))
+
+        print('run or skip: {}.'.format(flag))
+        if flag == 'skip':
+            return out_file
 
     # read ifgramStack file
     stack_obj = ifgramStack(ifgram_file)
@@ -246,14 +272,20 @@ def calc_num_nonzero_integer_closure_phase(ifgram_file, mask_file=None, dsName='
         closure_int = np.round((closure_pha - ut.wrap(closure_pha)) / (2.*np.pi))
         num_nonzero_closure[r0:r1, :] = np.sum(closure_int != 0, axis=0).reshape(-1, width)
 
-        prog_bar.update(i+1, every=1)
+        prog_bar.update(i+1, every=1, suffix='line {} / {}'.format(r0, length))
     prog_bar.close()
 
     # mask
     if mask_file is not None:
-        print('masking with file', mask_file)
         mask = readfile.read(mask_file)[0]
         num_nonzero_closure[mask == 0] = np.nan
+        print('mask out pixels with zero in file:', mask_file)
+
+    coh_file = os.path.join(out_dir, 'avgSpatialCoh.h5')
+    if os.path.isfile(coh_file):
+        coh = readfile.read(coh_file)[0]
+        num_nonzero_closure[coh == 0] = np.nan
+        print('mask out pixels with zero in file:', coh_file)
 
     # write to disk
     print('write to file', out_file)
@@ -263,13 +295,13 @@ def calc_num_nonzero_integer_closure_phase(ifgram_file, mask_file=None, dsName='
     writefile.write(num_nonzero_closure, out_file, meta)
 
     # plot
-    plot_num_nonzero_integer_closure_phase(out_file)
+    plot_num_triplet_with_nonzero_integer_ambiguity(out_file)
 
     return out_file
 
 
-def plot_num_nonzero_integer_closure_phase(fname, display=False, font_size=12, fig_size=[9,3]):
-    """Plot the histogram for the number of non-zero integer ambiguity
+def plot_num_triplet_with_nonzero_integer_ambiguity(fname, display=False, font_size=12, fig_size=[9,3]):
+    """Plot the histogram for the number of triplets with non-zero integer ambiguity
 
     Fig. 3d-e in Yunjun et al. (2019, CAGEO).
     """
@@ -299,7 +331,7 @@ def plot_num_nonzero_integer_closure_phase(fname, display=False, font_size=12, f
     ax.hist(data[~np.isnan(data)].flatten(), range=(0, vmax), log=True, bins=vmax)
 
     # axis format
-    ax.set_xlabel(r'# of non-zero integer ambiguity $T_{int}$', fontsize=font_size)
+    ax.set_xlabel(r'# of triplets w non-zero int ambiguity $T_{int}$', fontsize=font_size)
     ax.set_ylabel('# of pixels', fontsize=font_size)
     ax.xaxis.set_minor_locator(ticker.AutoMinorLocator())
     ax.yaxis.set_major_locator(ticker.LogLocator(base=10.0, numticks=15))
@@ -565,14 +597,14 @@ def main(iargs=None):
 
     else:
         # calculate the number of triplets with non-zero integer ambiguity
-        out_file = calc_num_nonzero_integer_closure_phase(inps.ifgram_file,
-                                                          mask_file=inps.waterMaskFile,
-                                                          dsName=inps.datasetNameIn,
-                                                          update_mode=inps.update_mode)
+        out_file = calc_num_triplet_with_nonzero_integer_ambiguity(inps.ifgram_file,
+                                                                   mask_file=inps.waterMaskFile,
+                                                                   dsName=inps.datasetNameIn,
+                                                                   update_mode=inps.update_mode)
         # for debug
-        #plot_num_nonzero_integer_closure_phase(out_file)
+        #plot_num_triplet_with_nonzero_integer_ambiguity(out_file)
     m, s = divmod(time.time()-start_time, 60)
-    print('\ntime used: {:02.0f} mins {:02.1f} secs\nDone.'.format(m, s))
+    print('time used: {:02.0f} mins {:02.1f} secs\nDone.'.format(m, s))
     return
 
 

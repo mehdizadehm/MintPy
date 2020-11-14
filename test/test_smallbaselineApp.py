@@ -26,6 +26,8 @@ URL_LIST = [
     'https://zenodo.org/record/3952953/files/FernandinaSenDT128.tar.xz',
     'https://zenodo.org/record/3952950/files/WellsEnvD2T399.tar.xz',
     'https://zenodo.org/record/3952917/files/KujuAlosAT422F650.tar.xz',
+    'https://zenodo.org/record/4265413/files/SanFranSenDT42.tar.xz',
+    'https://zenodo.org/record/4127335/files/WCapeSenAT29.tar.xz',
 ]
 
 PROJ_NAME_LIST = [os.path.basename(url).split('.tar.xz')[0] for url in URL_LIST]
@@ -109,11 +111,11 @@ def test_dataset(dset_name, test_dir, fresh_start=True, test_pyaps=False):
     else:
         # remove existing directory
         if os.path.isdir(dset_name):
-            print('removing existing project directory: {}'.format(dset_name))
+            print('remove existing project directory: {}'.format(dset_name))
             shutil.rmtree(dset_name)
 
         # uncompress tar file
-        print('extract content from tar file: {}'.format(tar_file))
+        print('extracting content from tar file: {}'.format(tar_file))
         tar = tarfile.open(tar_file)
         tar.extractall()
         tar.close()
@@ -132,7 +134,7 @@ def test_dataset(dset_name, test_dir, fresh_start=True, test_pyaps=False):
     cmd = 'smallbaselineApp.py {}'.format(template_file)
     print(cmd)
     status = subprocess.Popen(cmd, shell=True).wait()
-    if status is not 0:
+    if status != 0:
         raise RuntimeError('Test failed for example dataset {}'.format(dset_name))
 
     # custom plot of velocity map

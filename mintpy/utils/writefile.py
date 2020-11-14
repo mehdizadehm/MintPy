@@ -55,13 +55,12 @@ def write(datasetDict, out_file, metadata=None, ref_file=None, compression=None)
                 compression = readfile.get_hdf5_compression(ref_file)
 
             # list of auxiliary datasets
-            atr_ref = readfile.read_attribute(ref_file)
-            shape_ref = (int(atr_ref['LENGTH']), int(atr_ref['WIDTH']))
+            shape2d = (int(meta['LENGTH']), int(meta['WIDTH']))
             with h5py.File(ref_file, 'r') as fr:
                 auxDsNames = [i for i in fr.keys()
                               if (i not in list(datasetDict.keys())
                                   and isinstance(fr[i], h5py.Dataset)
-                                  and fr[i].shape[-2:] != shape_ref)]
+                                  and fr[i].shape[-2:] != shape2d)]
         else:
             auxDsNames = []
 
@@ -189,82 +188,137 @@ def write(datasetDict, out_file, metadata=None, ref_file=None, compression=None)
     return out_file
 
 
-def layout_hdf5(fname, dsNameDict, metadata):
+#########################################################################
+
+def layout_hdf5(fname, ds_name_dict=None, metadata=None, ref_file=None, compression=None, print_msg=True):
     """Create HDF5 file with defined metadata and (empty) dataset structure
 
-    Parameters: fname      - str, HDF5 file path
-                dsNameDict - dict, dataset structure definition, as below:
-                metadata   - dict, metadata
-    Returns:    fname      - str, HDF5 file path
+    Parameters: fname        - str, HDF5 file path
+                ds_name_dict - dict, dataset structure definition
+                               {dname : [dtype, dshape],
+                                dname : [dtype, dshape, None],
+                                dname : [dtype, dshape, 1/2/3D np.ndarray], #for aux data
+                                ...
+                               }
+                metadata     - dict, metadata
+                ref_file     - str, reference file for the data structure
+                compression  - str, HDF5 compression type
+    Returns:    fname        - str, HDF5 file path
 
-    Example:
+    Example:    layout_hdf5('timeseries_ERA5.h5', ref_file='timeseries.h5')
+                layout_hdf5('timeseries_ERA5.5h', ds_name_dict, metadata)
 
     # structure for ifgramStack
-    dsNameDict = {
-        "date"             : (np.dtype('S8'), (inps.num_pair, 2)),
-        "dropIfgram"       : (np.bool_,       (inps.num_pair,)),
-        "bperp"            : (np.float32,     (inps.num_pair,)),
-        "unwrapPhase"      : (np.float32,     (inps.num_pair, inps.length, inps.width)),
-        "coherence"        : (np.float32,     (inps.num_pair, inps.length, inps.width)),
-        "connectComponent" : (np.int16,       (inps.num_pair, inps.length, inps.width)),
+    ds_name_dict = {
+        "date"             : [np.dtype('S8'), (num_ifgram, 2)],
+        "dropIfgram"       : [np.bool_,       (num_ifgram,)],
+        "bperp"            : [np.float32,     (num_ifgram,)],
+        "unwrapPhase"      : [np.float32,     (num_ifgram, length, width)],
+        "coherence"        : [np.float32,     (num_ifgram, length, width)],
+        "connectComponent" : [np.int16,       (num_ifgram, length, width)],
     }
 
     # structure for geometry
-    dsNameDict = {
-        "height"             : (np.float32, (inps.length, inps.width)),
-        "incidenceAngle"     : (np.float32, (inps.length, inps.width)),
-        "slantRangeDistance" : (np.float32, (inps.length, inps.width)),
+    ds_name_dict = {
+        "height"             : [np.float32, (length, width), None],
+        "incidenceAngle"     : [np.float32, (length, width), None],
+        "slantRangeDistance" : [np.float32, (length, width), None],
     }
 
     # structure for timeseries
-    dsNameDict = {
-        "date"       : (np.dtype("S8"), (numDates,)),
-        "bperp"      : (np.float32,     (numDates,)),
-        "timeseries" : (np.float32,     (numDates, length, width))
+    dates = np.array(date_list, np.string_)
+    ds_name_dict = {
+        "date"       : [np.dtype("S8"), (num_date,), dates],
+        "bperp"      : [np.float32,     (num_date,), pbase],
+        "timeseries" : [np.float32,     (num_date, length, width)],
     }
     """
 
-    print('-'*50)
-    print('create HDF5 file {} with w mode'.format(fname))
-    h5 = h5py.File(fname, "w")
+    # get meta from metadata and ref_file
+    if metadata:
+        meta = {key: value for key, value in metadata.items()}
+    elif ref_file:
+        with h5py.File(ref_file, 'r') as fr:
+            meta = {key: value for key, value in fr.attrs.items()}
+        if print_msg:
+            print('grab metadata from ref_file: {}'.format(ref_file))
+    else:
+        raise ValueError('No metadata or ref_file found.')
+
+    # check ds_name_dict
+    if ds_name_dict is None:
+        ds_name_dict = {}
+
+        if ref_file and os.path.splitext(ref_file)[1] in ['.h5', '.he5']:
+            shape2d = (int(meta['LENGTH']), int(meta['WIDTH']))
+            with h5py.File(ref_file, 'r') as fr:
+                for key in fr.keys():
+                    ds = fr[key]
+                    if isinstance(ds, h5py.Dataset):
+                        # save all dataset info 
+                        ds_name_dict[key] = [ds.dtype, ds.shape, None]
+
+                        # save auxliary dataset value
+                        if ds.shape[-2:] != shape2d:
+                            ds_name_dict[key][2] = ds[:]
+    
+            if print_msg:
+                print('grab dataset structure from ref_file: {}'.format(ref_file))
+        else:
+            raise ValueError('No ds_name_dict or ref_file found.')
+
+    # create file
+    f = h5py.File(fname, "w")
+    if print_msg:
+        print('-'*50)
+        print('create HDF5 file: {} with w mode'.format(fname))
 
     # initiate dataset
-    for key in dsNameDict.keys():
-        data_type = dsNameDict[key][0]
-        data_shape = dsNameDict[key][1]
+    max_digit = max([len(i) for i in ds_name_dict.keys()])
+    for key in ds_name_dict.keys():
+        data_type  = ds_name_dict[key][0]
+        data_shape = ds_name_dict[key][1]
 
-        # turn ON compression
+        # turn ON compression for conn comp
         if key in ['connectComponent']:
             compression = 'lzf'
-        else:
-            compression = None
 
         # changable dataset shape
         if len(data_shape) == 3:
-            maxShape = (None, data_shape[1], data_shape[2])
+            max_shape = (None, data_shape[1], data_shape[2])
         else:
-            maxShape = data_shape
+            max_shape = data_shape
 
-        print("create dataset: {d:<25} of {t:<25} in size of {s}".format(d=key,
-                                                                         t=str(data_type),
-                                                                         s=data_shape))
-        h5.create_dataset(key,
-                          shape=data_shape,
-                          maxshape=maxShape,
-                          dtype=data_type,
-                          chunks=True,
-                          compression=compression)
+        # create empty dataset
+        if print_msg:
+            print(("create dataset  : {d:<{w}} of {t:<25} in size of {s} with "
+                   "compression = {c}").format(d=key,
+                                               w=max_digit,
+                                               t=str(data_type),
+                                               s=data_shape,
+                                               c=compression))
+        ds = f.create_dataset(key,
+                              shape=data_shape,
+                              maxshape=max_shape,
+                              dtype=data_type,
+                              chunks=True,
+                              compression=compression)
+
+        # write auxliary data
+        if len(ds_name_dict[key]) > 2 and ds_name_dict[key][2] is not None:
+            ds[:] = np.array(ds_name_dict[key][2])
 
     # write attributes
-    for key in metadata.keys():
-        h5.attrs[key] = metadata[key]
+    for key in meta.keys():
+        f.attrs[key] = meta[key]
 
-    h5.close()
-    print('close  HDF5 file {}'.format(fname))
+    f.close()
+    if print_msg:
+        print('close  HDF5 file: {}'.format(fname))
     return fname
 
 
-def write_hdf5_block(fname, data, datasetName, block=None, mode='a'):
+def write_hdf5_block(fname, data, datasetName, block=None, mode='a', print_msg=True):
     """Write data to existing HDF5 dataset in disk block by block.
     Parameters: data        - np.ndarray 1/2/3D matrix
                 datasetName - str, dataset name
@@ -297,11 +351,11 @@ def write_hdf5_block(fname, data, datasetName, block=None, mode='a'):
                      0, shape[2]]
 
     # write
-    print('-'*50)
-    print('open  HDF5 file {} in {} mode'.format(fname, mode))
-    with h5py.File(fname, mode) as f:
+    if print_msg:
+        print('-'*50)
+        print('open  HDF5 file {} in {} mode'.format(fname, mode))
         print("writing dataset /{:<25} block: {}".format(datasetName, block))
-
+    with h5py.File(fname, mode) as f:
         if len(block) == 6:
             f[datasetName][block[0]:block[1],
                            block[2]:block[3],
@@ -314,7 +368,8 @@ def write_hdf5_block(fname, data, datasetName, block=None, mode='a'):
         elif len(block) == 2:
             f[datasetName][block[0]:block[1]] = data
 
-    print('close HDF5 file {}.'.format(fname))
+    if print_msg:
+        print('close HDF5 file {}.'.format(fname))
     return fname
 
 
@@ -364,6 +419,9 @@ def remove_hdf5_dataset(fname, datasetNames, print_msg=True):
     return fname
 
 
+
+#########################################################################
+
 def write_roipac_rsc(metadata, out_file, update_mode=False, print_msg=False):
     """Write attribute dict into ROI_PAC .rsc file
     Inputs:
@@ -408,6 +466,73 @@ def write_roipac_rsc(metadata, out_file, update_mode=False, print_msg=False):
                                                    v=str(metadata[key])))
     return out_file
 
+
+def write_isce_xml(fname, width, length, bands=1, data_type='FLOAT', scheme='BIP'):
+    """Write XML metadata file in ISCE-2 format
+
+    Parameters: fname     - str, path of data file
+                width     - int, number of columns
+                length    - int, number of rows
+                bands     - int, number of band
+                data_type - str, data type name in ISCE convention
+                            readfile.GDAL2ISCE_DATATYPE
+                scheme    - str, band interleave, BIP, BIL, BSQ
+    """
+    import isce
+    import isceobj
+
+    img = isceobj.Image.createImage()
+    img.setFilename(fname)
+    img.setWidth(width)
+    img.setLength(length)
+    img.setAccessMode('READ')
+    img.bands = bands
+    img.dataType = data_type
+    img.scheme = scheme
+    img.renderHdr()
+    img.renderVRT()
+
+    return
+
+
+def write_isce_file(data, out_file, file_type='isce_unw'):
+    """write data to file in ISCE format
+
+    Parameters: data      - 2D np.ndarray, binary data matrix
+                out_file  - str, path of output binary data file
+                file_type - str, file type
+    Returns:    out_file  - str, path of output binary data file
+    """
+    import isce
+    import isceobj
+
+    # fix potential typo
+    file_type = file_type.replace('-', '_')
+
+    # write data to binary file
+    data.tofile(out_file)
+
+    # write isce xml metadata file
+    length, width = data.shape
+
+    if file_type == 'isce_unw':
+        width = int(width / 2)
+        write_isce_xml(out_file, width, length, bands=2, data_type='FLOAT', scheme='BIL')
+
+    elif file_type == 'isce_int':
+        write_isce_xml(out_file, width, length, bands=1, data_type='CFLOAT', scheme='BIL')
+
+    elif file_type == 'isce_cor':
+        write_isce_xml(out_file, width, length, bands=1, data_type='FLOAT', scheme='BIL')
+
+    else:
+        raise ValueError('un-recognized ISCE file type: {}'.format(file_type))
+
+    return out_file
+
+
+
+#########################################################################
 
 def write_float32(*args):
     """Write ROI_PAC rmg format with float32 precision (BIL)
